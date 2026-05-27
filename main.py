@@ -23,11 +23,15 @@ class DropletTrackerApp:
         self.raw_baseline_y = 500  
         self.bounding_boxes = {} 
         
-        # Interaction State Machine
-        self.interaction_mode = None # 'DRAW', 'MOVE', 'RESIZE_TL', 'RESIZE_R', etc.
+        self.interaction_mode = None 
         self.start_x = 0
         self.start_y = 0
         self.temp_box_cache = None 
+
+        # --- Playback State Variables ---
+        self.is_playing = False
+        self.play_direction = 1
+        self.playback_delay = 50  # ~20 FPS (50 milliseconds per frame)
         
         self.setup_ui()
         self.root.bind("<Escape>", self.clear_current_box)
@@ -43,16 +47,38 @@ class DropletTrackerApp:
         self.scale_entry.insert(0, "50") 
         self.scale_entry.pack(fill=tk.X)
 
+        tk.Label(control_frame, text="Initial Dia (mm):", bg="#f0f0f0").pack(anchor=tk.W, pady=(10,2))
+        self.init_dia_entry = tk.Entry(control_frame)
+        self.init_dia_entry.insert(0, "2.52") 
+        self.init_dia_entry.pack(fill=tk.X)
+
         tk.Label(control_frame, text="Impact Frame (t=0):", bg="#f0f0f0").pack(anchor=tk.W, pady=(15,2))
         self.t0_entry = tk.Entry(control_frame)
         self.t0_entry.insert(0, "0")
         self.t0_entry.pack(fill=tk.X)
         tk.Button(control_frame, text="Set Current Frame as t=0", command=self.set_t0).pack(fill=tk.X, pady=5)
 
+        # --- Manual Navigation ---
         nav_frame = tk.Frame(control_frame, bg="#f0f0f0")
-        nav_frame.pack(pady=20, fill=tk.X)
-        tk.Button(nav_frame, text="< Prev", command=lambda: self.change_frame(-1)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(nav_frame, text="Next >", command=lambda: self.change_frame(1)).pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=2)
+        nav_frame.pack(pady=(15, 2), fill=tk.X)
+        tk.Button(nav_frame, text="< Prev", command=self.manual_prev).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(nav_frame, text="Next >", command=self.manual_next).pack(side=tk.RIGHT, expand=True, fill=tk.X, padx=2)
+
+        # --- NEW: Playback Engine Controls ---
+        playback_frame = tk.Frame(control_frame, bg="#f0f0f0")
+        playback_frame.pack(pady=(2, 10), fill=tk.X)
+        tk.Button(playback_frame, text="<< Play", command=self.play_backward, width=5).pack(side=tk.LEFT, expand=True, padx=1)
+        tk.Button(playback_frame, text="Pause", command=self.pause, width=5, bg="#ffcccc").pack(side=tk.LEFT, expand=True, padx=1)
+        tk.Button(playback_frame, text="Play >>", command=self.play_forward, width=5).pack(side=tk.LEFT, expand=True, padx=1)
+        # -------------------------------------
+
+        jump_frame = tk.Frame(control_frame, bg="#f0f0f0")
+        jump_frame.pack(pady=5, fill=tk.X)
+        tk.Label(jump_frame, text="Jump to:", bg="#f0f0f0").pack(side=tk.LEFT)
+        self.jump_entry = tk.Entry(jump_frame, width=8)
+        self.jump_entry.pack(side=tk.LEFT, padx=5)
+        self.jump_entry.bind('<Return>', lambda event: self.jump_to_frame())
+        tk.Button(jump_frame, text="Go", command=self.jump_to_frame).pack(side=tk.LEFT)
 
         self.frame_label = tk.Label(control_frame, text="Frame: 0 / 0", font=("Arial", 10, "bold"), bg="#f0f0f0")
         self.frame_label.pack(pady=10)
@@ -63,9 +89,10 @@ class DropletTrackerApp:
             "• Left-Click Drag -> Draw New Box\n"
             "• Left-Click Inside -> Move Box\n"
             "• Left-Click Handles -> Resize Box\n"
-            "• Press [ESC] -> Auto-detect / Delete"
+            "• Press [ESC] -> Auto-detect / Delete\n\n"
+            "Note: Interacting pauses playback."
         )
-        tk.Label(control_frame, text=instructions, justify=tk.LEFT, fg="#555", bg="#f0f0f0").pack(pady=20, anchor=tk.W)
+        tk.Label(control_frame, text=instructions, justify=tk.LEFT, fg="#555", bg="#f0f0f0").pack(pady=10, anchor=tk.W)
 
         tk.Button(control_frame, text="2. Export & Plot", command=self.trigger_export, bg="#2196F3", fg="white", font=("Arial", 10, "bold"), height=2).pack(fill=tk.X, side=tk.BOTTOM, pady=10)
 
@@ -76,6 +103,48 @@ class DropletTrackerApp:
         self.canvas.bind("<B1-Motion>", self.on_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_left_release)
         self.canvas.bind("<B3-Motion>", self.on_right_drag) 
+
+    # --- PLAYBACK ENGINE ---
+    def manual_prev(self):
+        self.pause()
+        self.change_frame(-1)
+
+    def manual_next(self):
+        self.pause()
+        self.change_frame(1)
+
+    def play_forward(self):
+        self.play_direction = 1
+        if not self.is_playing:
+            self.is_playing = True
+            self.play_loop()
+
+    def play_backward(self):
+        self.play_direction = -1
+        if not self.is_playing:
+            self.is_playing = True
+            self.play_loop()
+
+    def pause(self):
+        self.is_playing = False
+
+    def play_loop(self):
+        if not self.is_playing:
+            return
+
+        # Check bounds: Stop playing if we hit the end or beginning
+        if (self.play_direction == 1 and self.current_frame_idx >= self.num_frames - 1) or \
+           (self.play_direction == -1 and self.current_frame_idx <= 0):
+            self.pause()
+            return
+
+        # Advance frame
+        self.change_frame(self.play_direction)
+        
+        # Schedule the next frame update 
+        # (This keeps the GUI responsive while video plays)
+        self.root.after(self.playback_delay, self.play_loop)
+    # -----------------------
 
     def clear_current_box(self, event=None):
         if self.current_frame_idx in self.bounding_boxes:
@@ -97,22 +166,17 @@ class DropletTrackerApp:
                 _, self.images, self.timestamps = cr.read(filepath, start_frame, frame_count)
             
             self.num_frames = len(self.images)
-            
-            if len(self.timestamps) > 1:
-                self.fps = 1.0 / (self.timestamps[1] - self.timestamps[0])
-            else:
-                self.fps = getattr(metadata, 'FrameRate1', 1000) 
+            self.fps = 1.0 / (self.timestamps[1] - self.timestamps[0]) if len(self.timestamps) > 1 else getattr(metadata, 'FrameRate1', 1000) 
             
             orig_h, orig_w = self.images[0].shape
             max_w, max_h = 800, 600
             self.resize_factor = min(max_w / orig_w, max_h / orig_h)
-            
-            if self.resize_factor > 1.0: 
-                self.resize_factor = 1.0 
+            if self.resize_factor > 1.0: self.resize_factor = 1.0 
                 
             self.raw_baseline_y = int(orig_h - (50 / self.resize_factor))
             self.current_frame_idx = 0
             self.bounding_boxes = {}
+            self.pause() # Reset playback state on load
             self.update_display()
             
         except Exception as e:
@@ -126,6 +190,19 @@ class DropletTrackerApp:
         if self.images is not None:
             self.current_frame_idx = max(0, min(self.num_frames - 1, self.current_frame_idx + step))
             self.update_display()
+
+    def jump_to_frame(self):
+        if self.images is None: return
+        self.pause() # Auto-pause when jumping
+        try:
+            target_frame = int(self.jump_entry.get())
+            if 0 <= target_frame < self.num_frames:
+                self.current_frame_idx = target_frame
+                self.update_display()
+            else:
+                messagebox.showwarning("Out of Bounds", f"Enter a frame between 0 and {self.num_frames - 1}.")
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Please enter a valid frame number.")
 
     def update_display(self):
         if self.images is None: return
@@ -167,29 +244,31 @@ class DropletTrackerApp:
             disp_w = int(raw_w * self.resize_factor)
             disp_h = int(raw_h * self.resize_factor)
             
-            # Draw primary box
             self.canvas.create_rectangle(disp_x, disp_y, disp_x+disp_w, disp_y+disp_h, outline="#00FF00", width=2, tags="bbox")
             
-            # --- 8-POINT CROP HANDLES ---
-            hs = 4 # Half-size of the handle
+            hs = 4 
             handle_coords = [
-                (disp_x, disp_y),                     # Top-Left
-                (disp_x + disp_w//2, disp_y),         # Top-Center
-                (disp_x + disp_w, disp_y),            # Top-Right
-                (disp_x, disp_y + disp_h//2),         # Left-Center
-                (disp_x + disp_w, disp_y + disp_h//2),# Right-Center
-                (disp_x, disp_y + disp_h),            # Bottom-Left
-                (disp_x + disp_w//2, disp_y + disp_h),# Bottom-Center
-                (disp_x + disp_w, disp_y + disp_h)    # Bottom-Right
+                (disp_x, disp_y),                     
+                (disp_x + disp_w//2, disp_y),         
+                (disp_x + disp_w, disp_y),            
+                (disp_x, disp_y + disp_h//2),         
+                (disp_x + disp_w, disp_y + disp_h//2),
+                (disp_x, disp_y + disp_h),            
+                (disp_x + disp_w//2, disp_y + disp_h),
+                (disp_x + disp_w, disp_y + disp_h)    
             ]
             for hx, hy in handle_coords:
                 self.canvas.create_rectangle(hx - hs, hy - hs, hx + hs, hy + hs, fill="yellow", outline="black", tags="handle")
             
         self.frame_label.config(text=f"Frame: {self.current_frame_idx} / {self.num_frames - 1}")
+        
+        self.jump_entry.delete(0, tk.END)
+        self.jump_entry.insert(0, str(self.current_frame_idx))
 
-    # --- MOUSE LOGIC ---
     def on_right_drag(self, event):
         if self.images is None: return
+        self.pause() # Auto-pause when adjusting baseline
+        
         max_disp_y = 600 if self.resize_factor == 1.0 else int(self.images[0].shape[0] * self.resize_factor)
         safe_y = max(0, min(event.y, max_disp_y))
         
@@ -198,6 +277,8 @@ class DropletTrackerApp:
 
     def on_left_press(self, event):
         if self.images is None: return
+        self.pause() # Auto-pause when user interacts with the canvas
+        
         self.start_x = event.x
         self.start_y = event.y
         
@@ -208,7 +289,6 @@ class DropletTrackerApp:
             dw = rw * self.resize_factor
             dh = rh * self.resize_factor
             
-            # Hitbox definitions for the 8 handles
             hit_tolerance = 8
             handles = {
                 'TL': (dx, dy),
@@ -221,20 +301,17 @@ class DropletTrackerApp:
                 'BR': (dx + dw, dy + dh)
             }
             
-            # Check if clicked on any handle
             for name, (hx, hy) in handles.items():
                 if abs(event.x - hx) <= hit_tolerance and abs(event.y - hy) <= hit_tolerance:
                     self.interaction_mode = f'RESIZE_{name}'
                     self.temp_box_cache = (rx, ry, rw, rh)
                     return
             
-            # Check if clicked inside the box
             if dx < event.x < dx + dw and dy < event.y < dy + dh:
                 self.interaction_mode = 'MOVE'
                 self.temp_box_cache = (rx, ry, rw, rh)
                 return
 
-        # Empty space click
         self.interaction_mode = 'DRAW'
 
     def on_left_drag(self, event):
@@ -252,25 +329,25 @@ class DropletTrackerApp:
             self.update_display()
             
         elif self.interaction_mode.startswith('RESIZE_'):
-            # Convert mouse movement to raw video coordinates
             dx_raw = int((event.x - self.start_x) / self.resize_factor)
             dy_raw = int((event.y - self.start_y) / self.resize_factor)
             
             orig_x, orig_y, orig_w, orig_h = self.temp_box_cache
             new_x, new_y, new_w, new_h = orig_x, orig_y, orig_w, orig_h
             
-            # Dynamic math to shift coordinates without flipping the box
-            if 'L' in self.interaction_mode:
+            handle_type = self.interaction_mode.split('_')[1]
+            
+            if 'L' in handle_type:
                 delta = min(dx_raw, orig_w - 5) 
                 new_x = orig_x + delta
                 new_w = orig_w - delta
-            if 'R' in self.interaction_mode:
+            if 'R' in handle_type:
                 new_w = max(5, orig_w + dx_raw)
-            if 'T' in self.interaction_mode:
+            if 'T' in handle_type:
                 delta = min(dy_raw, orig_h - 5)
                 new_y = orig_y + delta
                 new_h = orig_h - delta
-            if 'B' in self.interaction_mode:
+            if 'B' in handle_type:
                 new_h = max(5, orig_h + dy_raw)
                 
             self.bounding_boxes[self.current_frame_idx] = (new_x, new_y, new_w, new_h)
@@ -297,17 +374,20 @@ class DropletTrackerApp:
     def trigger_export(self):
         try:
             px_per_mm = float(self.scale_entry.get())
-            if px_per_mm <= 0:
+            init_dia = float(self.init_dia_entry.get())
+            t0_frame = int(self.t0_entry.get())
+
+            if px_per_mm <= 0 or init_dia <= 0:
                 raise ValueError
             
             scale = 1.0 / px_per_mm
-            t0_frame = int(self.t0_entry.get())
             
         except ValueError:
-            messagebox.showerror("Input Error", "Please ensure Scale (>0) and Impact Frame are valid numbers.")
+            messagebox.showerror("Input Error", "Please ensure Scale (>0), Initial Dia (>0), and Impact Frame are valid numbers.")
             return
             
-        export_and_plot(self.bounding_boxes, self.fps, scale, t0_frame, self.raw_baseline_y)
+        self.pause() # Pause playback if hitting export
+        export_and_plot(self.bounding_boxes, self.timestamps, self.fps, scale, t0_frame, self.raw_baseline_y, init_dia)
 
 if __name__ == "__main__":
     root = tk.Tk()
